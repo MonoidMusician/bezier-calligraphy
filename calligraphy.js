@@ -123,9 +123,9 @@ const bases = dim => {
   return zeros.map((_, i) => new Vec(zeros.map((_, j) => +(i == j))));
 };
 
-const eval = cs => t => cs.reduce((r, c, i) => r + c * Math.pow(t, i), 0);
-const evals = vcs => t => vcs.map(cs => eval(cs)(t));
-const EVAL = cvs => t => transposed(cs => eval(cs)(t))(cvs);
+const value = cs => t => cs.reduce((r, c, i) => r + c * Math.pow(t, i), 0);
+const values = vcs => t => vcs.map(cs => value(cs)(t));
+const EVAL = cvs => t => transposed(cs => value(cs)(t))(cvs);
 const deriv = cs => cs.map((v, i) => i * v).slice(1);
 const DERIV = transposing(deriv);
 
@@ -154,7 +154,7 @@ const Bcurvature0 = ([b0,b1,b2,_]) => {
 };
 const Bcurvature1 = ([b0,b1,b2,b3]) => -Bcurvature0([b3,b2,b1,b0]);
 const Bcurvature = C => t => {
-  let [numer, denom] = Bcurvature_polys(C).map(p => eval(p)(t));
+  let [numer, denom] = Bcurvature_polys(C).map(p => value(p)(t));
   return numer/Math.pow(denom, 1.5);
 };
 const Bcurvature_polys = C => {
@@ -173,7 +173,7 @@ const solve_quartic = cs => {
   let rs = quartic(cs.slice().reverse());
   //console.log(cs);
   let rs2 = rs.filter(r => r.im === 0).map(r => r.re);
-  //console.log(rs2.map(r => ([r, eval(cs)(r)])));
+  //console.log(rs2.map(r => ([r, value(cs)(r)])));
   return rs2;
 };
 const fit = (f0,f1,d0,d1,k0,k1) => {
@@ -305,14 +305,14 @@ const T_IMPLICIT = (P,Q) => {
   var QQ = transpose(DERIV(B(Q)));
   return sub(dmul(QQ[1], PP[0]), dmul(QQ[0], PP[1]));
 };
-const T_SOL = (P,Q) => p => solve_norm(evals(T_IMPLICIT(P,Q))(p));
+const T_SOL = (P,Q) => p => solve_norm(values(T_IMPLICIT(P,Q))(p));
 const T_DERIV = (P,Q) => p => {
   // multivariate polynomial in q,p
   let EQ = T_IMPLICIT(P,Q);
   // quadratic equation for q at p
-  let eq = evals(EQ)(p);
+  let eq = values(EQ)(p);
   // derivative of eq
-  let dq = evals(EQ.map(deriv))(p);
+  let dq = values(EQ.map(deriv))(p);
   return solve_deriv(eq, dq);
 };
 // c.T_DERIVS(c.ex.P, c.ex.Q)(0.36657)
@@ -341,8 +341,8 @@ const PQ_CURVATURE = (P,Q) => p => {
   (x''y' - y''x')/((x'2 + y'2)^3/2)
   */
 };
-const T_VERIFY = (P,Q) => (p, q) => eval(evals(T_IMPLICIT(P,Q))(p))(q === undefined ? T_SOL(P,Q)(p) : q);
-const T_VERIFY2 = (P,Q) => (p, q) => eval(evals(T_IMPLICIT(Q,P))(q === undefined ? T_SOL(P,Q)(p) : q))(p);
+const T_VERIFY = (P,Q) => (p, q) => value(values(T_IMPLICIT(P,Q))(p))(q === undefined ? T_SOL(P,Q)(p) : q);
+const T_VERIFY2 = (P,Q) => (p, q) => value(values(T_IMPLICIT(Q,P))(q === undefined ? T_SOL(P,Q)(p) : q))(p);
 const T_VERIFYT = (P,Q) => (p, q) => {
   if (p === undefined) q = T_SOL(P,Q)(p);
   var PPp = EVAL(DERIV(B(P)))(p);
@@ -359,8 +359,8 @@ const T_VERIFY3 = (P,Q) => (p, q) => {
 //const T_DERIV = ;
 
 module.exports = {
-  zipWith, add, sub, mul, compose, transpose, dot, lift1, lift2, map, eval, deriv, N, Y, b, B, bases,
-  muldot, summate, sum, DERIV, EVAL, evals, dmul,
+  zipWith, add, sub, mul, compose, transpose, dot, lift1, lift2, map, value, deriv, N, Y, b, B, bases,
+  muldot, summate, sum, DERIV, EVAL, values, dmul,
   transposing, transposed,
   solve_norm, solve, solve_deriv, solve_deriv_,
   T_IMPLICIT, T_SOL, T_VERIFY, T_VERIFY2, T_VERIFYT, T_VERIFY3,
