@@ -368,7 +368,6 @@ module.exports = {
   curvature, Bcurvature, Bcurvature_polys, Bcurvature0, Bcurvature1,
   fit, fit_existing, fit_existing_score,
   raise, pmul, norm, normalize,
-  Vec, Poly, Curve, curveD,
   ex: (function() {
     let r = {};
     try {
