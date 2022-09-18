@@ -1,8 +1,18 @@
 <!doctype html>
 <meta charset="utf-8"/>
-<body style="padding:0;margin:0">
+<body style="padding:0;margin:0;background:#051627;background:#043147;">
+<script src="https://cdn.jsdelivr.net/npm/path-data-polyfill@1.0.3/path-data-polyfill.min.js"></script>
 </body>
-
+<style>
+  #superpath path:nth-child(2n) {
+    stroke: blue;
+  }
+  .annot path:hover {
+    stroke: blue;
+    fill: #0059;
+    pointer-events: stroke;
+  }
+</style>
 <script>
 // https://observablehq.com/@monoidmusician/svg-calligraphy@1926
 
@@ -56,7 +66,6 @@ var scaled = (event,el) => {
   var disp = svg?.getBoundingClientRect();
   var vb = svg?.viewBox?.animVal || svg?.viewBox?.baseVal;
   var scale = (outer, offset, inner, value) => offset + value*inner/outer;
-  //console.log(svg, disp, vb);
   return {
     x: scale(disp.width, vb.x, vb.width, event.x),
     y: scale(disp.height, vb.y, vb.height, event.y),
@@ -108,12 +117,22 @@ function mkSVG(n) {
       }
       v = r;
     }
-    node.setAttribute(a, v);
+    if (a.startsWith("on")) {
+      node[a] = v;
+    } else {
+      node.setAttribute(a, v);
+    }
   }
   if (n.children) {
     for (let c of n.children) {
       if (!(c instanceof SVGElement)) c = mkSVG(c);
       node.appendChild(c);
+    }
+  }
+  if (attrs.id) {
+    var other = document.getElementById(attrs.id);
+    if (other) {
+      other.replaceWith(node);
     }
   }
   return node;
@@ -130,10 +149,6 @@ function placesI(iters=400) {
 }
 
 var places = placesI();
-
-document.addEventListener("DOMContentLoaded", () => {
-  document.body.appendChild(visualize(guideS, toPath(segments)));
-});
 
 function pathToCurves(path) {
   path = getPathData(path);
@@ -168,30 +183,49 @@ function curvesToPath(curves) {
   return r;
 }
 
-function doTheThing(p1, p2) {
-  // TODO: Split p2 at inflection points
-  p2 = getPathData(p2);
+var time_depth = 0;
+function time(label, fn, ...args) {
+  return fn(...args);
+  var start = performance.now();
+  time_depth += 1;
+  var r = fn(...args);
+  time_depth -= 1;
+  var end = performance.now();
+  console.log(`${label}: ${(end - start).toFixed(2)}ms`);
+  return r;
+}
+
+function doTheThing(p1, p2, well) {
+  var start = performance.now();
+  registry = {};
+  ps = getPathData(p2);
+  p2 = (splitPathAtInflections(p2));
   let c2s = pathToCurves(p2);
   p1 = getPathData(p1);
   let c1s = pathToCurves(p1);
   let rs = [];
   // Then get tangents and concavities to split p1 at
-  let allTangents = [];
+  let allTangents = c2s.flatMap(getTangentsL);
+  function getTangentsL(c2) {
+    return [tangent(c2[0], c2[1]), tangent(c2[2], c2[3]), tangent(c2[0], c2[3])];
+  }
   let allKeys = [];
   for (let c2 of c2s) {
-    let tangents = [tangent(c2[0], c2[1]), tangent(c2[2], c2[3]), tangent(c2[0], c2[3])];
-    allTangents.push(...tangents);
-    c1s2 = c1s.flatMap(c1 => splitBezierAtTangents(c1, tangents));
+    let tangents = getTangentsL(c2);
+    let c1s2 = c1s.flatMap(c1 => splitBezierAtTangents(c1, well === 2 ? allTangents : tangents));
     for (let c1 of c1s2) {
       let r = doTheTask(c1, c2);
       rs.push(...r.map(curvesToPath));
       allKeys.push(c1[0], c1[3]);
     }
   }
-  allKeys = uniqBy(allKeys, x => x.toString());
-  for (let [dx,dy] of allKeys) {
-    rs.push(curvesToPath(c2s.map(c2 => c2.map(([x,y]) => ([x+dx,y+dy])))));
+  if (well) {
+    allKeys = uniqBy(allKeys, x => x.toString());
+    for (let [dx,dy] of allKeys) {
+      rs.push(curvesToPath(c2s.map(c2 => c2.map(([x,y]) => ([x+dx,y+dy])))));
+    }
   }
+  console.log((performance.now() - start).toFixed(2));
   return rs;
 }
 function chop(points, t0, t1) {
@@ -206,8 +240,17 @@ function chop(points, t0, t1) {
     return bsplitMany(points, [t0,t1])[1];
   }
 }
+var registry = {};
+let lookup = path => {
+  curves = pathToCurves(getPathData(path));
+  for (let curve of curves) {
+    let r = registry[curve.toString()];
+    if (r) return r;
+  }
+  throw new Error("Unknown path " + path.toString());
+}
 function doTheTask(P, Q) {
-  let {T_SOL,composite} = calligraphy;
+  let {T_SOL,compositeI} = calligraphy;
   function add([x0,y0], [x1,y1]) {
     return [x0+x1,y0+y1];
   }
@@ -217,21 +260,30 @@ function doTheTask(P, Q) {
     [0, P.map(p => add(p, Q[0])), 0],
     [1, P.map(p => add(p, Q[3])), 1],
   ];
+  registry[ts[0][1].toString()] = [P,Q];
+  registry[ts[1][1].toString()] = [P,Q];
   let tts = [
     [ts[0], ts[1]],
   ];
+  let err = 0;
   try {
-    ts.push(
-      [T_SOL(P,Q)(0), composite(P,Q), T_SOL(P,Q)(1)]
-    );
-    ts[2][1].length;
-    tts.push(
-      [ts[0], ts[2]],
-      [ts[1], ts[2]],
-    );
+    ts.push(compositeI(P,Q));
+    if (ts[2][1].every(p => p.every(Number.isFinite))) {
+      //tts.pop();
+      tts.push(
+        [ts[0], ts[2]],
+        [ts[1], ts[2]],
+      );
+    }
   } catch(e) {
-    //console.log(e)
-    void(0);
+    try {
+      T_SOL(P,Q)(0);
+      T_SOL(P,Q)(1);
+      //console.error(e);
+      err = 1;
+    } catch(e2) {
+      //console.log(e);
+    }
   }
   function chopped([[t0, conn0, d0], [t1, conn1, d1]]) {
     return [
@@ -244,138 +296,397 @@ function doTheTask(P, Q) {
   return tts.map(chopped);
 }
 
-function visualize(p1, p2) {
-  let {
-    Vec,Curve,Poly,add,sub,mul,
-    T_SOL,PQ_CURVATURE,COMP,
-    Bcurvature0,Bcurvature1,
-    fit_check, normalize,
-    composite,
-  } = calligraphy;
-  let sp1 = splitPathAtTangentsOf(p1, p2);
-  let sp2 = splitPathAtTangentsOf(p2, p1);
-  let POI = sp1[sp1.length - 11].values.slice(-2);
-  let ps2 = startingAt(POI, sp2);
-  //let BOI = ;
-  let points = [
-    new Vec(sp1[sp1.length - 10].values.slice(-2)),
-    new Vec(sp1[sp1.length - 11].values.slice(-2)),
-    new Vec(ps2[ps2.length - 4].values.slice(-2)),
-  ];
-  function extract(segments, i0, i1) {
-    if (i0 < 0) i0 += segments.length;
-    if (i1 < 0) i1 += segments.length;
-    const r = [];
-    for (let i = i0; i <= i1; i++) {
-      r.push(new Curve([
-        new Vec(segments[i-1].values.slice(-2)),
-        ...group(segments[i].values).map(v => new Vec(v))
-      ]));
+function guesstimate(curves) {
+  if (curves.length === 1) return new Curve(curves[0]);
+  const c0 = curves[0]; const c1 = curves[curves.length-1];
+  const f0 = c0[0];
+  const f1 = c1[3];
+  const d0 = sub(c0[1], c0[0]);
+  const d1 = sub(c1[3], c1[2]);
+  const k0 = Bcurvature0(c0);
+  const k1 = Bcurvature1(c1);
+  return fit_check(f0,f1,d0,d1,k0,k1);
+}
+
+function center(path) {
+  //return startingAt([0,0],path);
+  path = getPathData(path);
+  let points = getPoints(path);
+  let avg = getOrigin(path).map(x => x*points.length);
+  for (let point of points) {
+    avg[0] -= point[0];
+    avg[1] -= point[1];
+  }
+  avg = avg.map(x => x/points.length);
+  return startingAt(avg, path);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  document.body.appendChild(interactive());
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  document.body.appendChild(visualize(guideS, toPath(segmentsC)));
+});
+
+function listen(to, name, listener) {
+  if (!to) to = document;
+  let event = e => {
+    if (listener)
+      return listener(e);
+  };
+  to.addEventListener(name, event);
+  return () => {
+    to.removeEventListener(name, event);
+  }
+}
+function mkListeners(obj, df_tgt) {
+  for (let k in obj) {
+    let v = obj[k];
+    let t = v.target;
+    if (t === undefined) t = df_tgt;
+    if (!t) t = document;
+    let a = v.active;
+    let is_active = false;
+    Object.defineProperty(v, "active", {
+      get: () => !!is_active,
+      set: actv => {
+        if (!!is_active === !!actv) return;
+        if (is_active) {
+          is_active(); is_active = null;
+        } else {
+          is_active = listen(t, k, v);
+        }
+      },
+    });
+    v.active = a;
+  }
+}
+
+var localized = (event,el, to) => {
+  if (!to) to = {x:0,y:0};
+  var svg = getSVG(el || event.target);
+  var disp = svg?.getBoundingClientRect();
+  var vb = svg?.viewBox?.animVal || svg?.viewBox?.baseVal;
+  var scale = (origin, outer, offset, inner, value) => offset + value*inner/outer;
+  //console.log(svg, disp, vb);
+  return {
+    x: scale(disp.left, disp.width, vb.x, vb.width, event.pageX) - to.x,
+    y: scale(disp.top, disp.height, vb.y, vb.height, event.pageY) - to.y,
+  };
+}
+
+function draggable(node, datum=undefined, done=undefined) {
+  let dragging = false;
+  let o = null;
+  let debounce = null;
+  let listeners = {
+    mousedown: Object.assign(e => {
+      o = localized(e, node);
+      if (datum) {
+        datum(node, o, o, {x:0,y:0}, e);
+      }
+      listeners.active = true;
+    }, {target: node, active: true}),
+    mousemove: Object.assign(e => {
+      if (datum) {
+        let c = localized(e, node);
+        datum(node, c, o, {x:c.x-o.x,y:c.y-o.y}, e);
+      }
+      if (done) {
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          done(node, false);
+        }, 50);
+      }
+    }, {target: null}),
+    mouseup: Object.assign(e => {
+      o = null;
+      listeners.active = false;
+      if (done) {
+        done(node, true, e);
+      }
+    }, {target: null}),
+  };
+  Object.defineProperty(listeners, "active", {
+    set: actv => {
+      listeners.mousemove.active = actv;
+      listeners.mouseup.active = actv;
     }
-    return r;
-  }
-  let Ps = extract(sp1, -10, -10);
-  let Qs = extract(ps2, -3, -1);
-  function guesstimate(curves) {
-    if (curves.length === 1) return new Curve(curves[0]);
-    const c0 = curves[0]; const c1 = curves[curves.length-1];
-    const f0 = c0[0];
-    const f1 = c1[3];
-    const d0 = sub(c0[1], c0[0]);
-    const d1 = sub(c1[3], c1[2]);
-    const k0 = Bcurvature0(c0);
-    const k1 = Bcurvature1(c1);
-    return fit_check(f0,f1,d0,d1,k0,k1);
-  }
-  function render(curve) {
-    return "M"+Array.from(curve[0])+"C"+Array.from(curve.slice(1)).map(x => Array.from(x));
-  }
-  let P = guesstimate(Ps).reverse();
-  let Q = guesstimate(Qs).reverse();
-  Q = Q.map(v => sub(v, Q[0]));
-  let PQ = composite(P,Q);
-  //console.log(doTheThing(p1, p2));
-  let PsOI = [
-    mkPath(render(P)),
-    mkPath(render(Q.map(v => add(v, POI)))),
-    mkPath(render(PQ)),
-  ];
-  let YEAH = doTheThing(p1, startingAt([0,0], p2)).map(mkPath);
+  });
+  mkListeners(listeners);
+  return node;
+}
+var segmentsC = [[[-1.8889230491002778,3.5185821502848356],[0.14815082738041596,1.2963197395786246],[1.4444705669590405,0.3703770684510346]],[[2.370413238086627,-0.5555656026765536],[4.5926756487928415,-1.8518853422551782],[4.222298580341807,-3.148205081833801]],[[2.1852247038611097,-2.2222624107062128],[1.2592820327335232,-2.40745094493173],[-0.4074147752961359,-1.2963197395786246]],[[-2.4444886517768296,-0.18518853422551906],[-3.000054254453385,0.7407541369020691],[-2.6296771860023505,2.0370738764806937]]];
+var INPUT = {
+  nib: {
+    value: [],
+  },
+};
+function rotate([x,y], a) {
+  var c = Math.cos(a);
+  var s = Math.sin(a);
+  return [x*c + y*s, y*c - x*s];
+}
+function rotateXY({x,y}, a) {
+  var c = Math.cos(a);
+  var s = Math.sin(a);
+  return {x:x*c + y*s, y:y*c - x*s};
+}
+function toDegrees (angle) {
+  return angle * (180 / Math.PI);
+}
+function toRadians (angle) {
+  return angle * (Math.PI / 180);
+}
+function roundAngle(angle) {
+  return toRadians((Math.round(toDegrees(angle) + 45 + 360) % 90) - 45);
+}
+function interactive() {
+  var path = mkPath(toPath(segmentsC));
+  var copySegments = () => segmentsC.map(ps => ps.map(p => p.map(xy => xy)));
+  var mutateSegments = (fn,against) => {
+    if (!against) against = segmentsC;
+    for (let i in segmentsC) {
+      for (let j in segmentsC[i]) {
+        var p = fn(against[i][j]);
+        Object.assign(segmentsC[i][j], p);
+        segmentsC[i][j].node.setAttribute("cx", segmentsC[i][j][0]);
+        segmentsC[i][j].node.setAttribute("cy", segmentsC[i][j][1]);
+        path.setAttribute("d", renderPathData(toPath(segmentsC)));
+      }
+    }
+  };
+  var restoreSegments = against => mutateSegments(p => p, against);
+  var rotating = f => ([x,y]) => {
+    return rotate(f(rotate([x,y], angle)), -angle);
+  };
+  let update = () => requestAnimationFrame(() => visualize(guideS, toPath(segmentsC)));
+  let update2 = (_, reallyDone) => {
+    mkSVG({
+      type: "g",
+      id: "superpath",
+      fill: "none",
+      children: pathToCurves(splitPathAtInflections(toPath(segmentsC))).map(c => mkPath(curvesToPath([c]))),
+    });
+    if (reallyDone) update();
+  };
+  let angle = toRadians(1 ? -44 : -37);
+  var superpath = mkSVG({
+    type: "g",
+    id: "superpath",
+    fill: "none",
+    children: pathToCurves(splitPathAtInflections(toPath(segmentsC))).map(c => mkPath(curvesToPath([c]))),
+  });
+  let arcs = [
+    "M 0 9.95 A 10 10 0 0 0 2 9.75 M 0 9.95 A 10 10 0 0 1 -2 9.75",
+    "M 0 -9.95 A 10 10 0 0 1 2 -9.75 M 0 -9.95 A 10 10 0 0 0 -2 -9.75",
+    "M 9.95 0 A 10 10 0 0 1 9.75 2 M 9.95 0 A 10 10 0 0 0 9.75 -2",
+    "M -9.95 0 A 10 10 0 0 0 -9.75 2 M -9.95 0 A 10 10 0 0 1 -9.75 -2",
+  ]
   return mkSVG({
     type: "svg",
+    id: "vis",
+    "viewBox": [-10, -10, 20, 20],
+    "style": {
+      "max-width": "calc(50vw - 5px)",
+      "max-height": "calc(100vh - 5px)",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "fill": "#000",
+      "stroke": "#444",
+      "stroke-width": 0.8,
+    },
+    children: [
+      {type:"g",style:{"fill":"none"},children:[path]},
+      //superpath,
+      picks = mkSVG({
+        type: "g",
+        style: {
+          "fill": "none",
+          "stroke": "transparent",
+          "stroke-width": 0.25,
+          "stroke-linecap": "butt",
+          "transform": `rotate(${angle}rad)`,
+        },
+        children: [
+          draggable(mkSVG({
+            type: "line",
+            style: {
+              "cursor": "ns-resize",
+            },
+            x1: -0, x2: 0, y1: -10, y2: 10,
+          }), (_, current, start) => {
+            if (current === start) {
+              start.points = copySegments();
+            } else {
+              var scale = rotateXY(current, angle).y / rotateXY(start, angle).y;
+              mutateSegments(rotating(([x,y]) => ([x,scale*y])), start.points);
+            }
+          }, update2),
+          draggable(mkSVG({
+            type: "line",
+            style: {
+              "cursor": "ew-resize",
+            },
+            x1: -10, x2: 10, y1: -0, y2: 0,
+          }), (_, current, start) => {
+            if (current === start) {
+              start.points = copySegments();
+            } else {
+              var scale = rotateXY(current, angle).x / rotateXY(start, angle).x;
+              mutateSegments(rotating(([x,y]) => ([scale*x,y])), start.points);
+            }
+          }, update2),
+          draggable(mkSVG({
+            type: "circle",
+            style: {
+              "fill": "transparent",
+              "cursor": "move",
+            },
+            cx: 0, cy: 0, r: 0.25,
+          }), (_, current, start, delta) => {
+            if (current === start) {
+              start.points = copySegments();
+            } else {
+              let factor = 1;
+              mutateSegments(([x,y]) => ([x + factor*delta.x, y + factor*delta.y]), start.points);
+            }
+          }, update2),
+          ...arcs.map(arc => draggable(mkSVG({
+            type: "path",
+            d: arc,
+            style: {cursor:"crosshair"},
+          }), (_node, current, start, _delta, event) => {
+            if (current === start) {
+              start.original_angle = angle;
+              start.angle = Math.atan2(start.y, start.x);
+              start.points = copySegments();
+            } else {
+              current.angle = Math.atan2(current.y, current.x);
+              angle = roundAngle(current.angle - start.angle) + start.original_angle;
+              gui.style.transform = `rotate(${angle}rad)`;
+              picks.style.transform = `rotate(${angle}rad)`;
+              if (!event.shiftKey) {
+                mutateSegments(p => rotate(p, toRadians(Math.round(toDegrees(start.angle - current.angle)))), start.points);
+              } else {
+                restoreSegments(start.points);
+              }
+            }
+          }, update2)),
+        ]
+      }),
+      {
+        type:"g",
+        children: segmentsC.flatMap(x=>x).map(p =>
+          draggable(p.node = mkSVG({
+            type: "circle",
+            "cx": p[0],
+            "cy": p[1],
+            "r": .15,
+            "fill": "gray",
+            "stroke": "lightgray",
+            "stroke-width": 0.05,
+          }), (node, current, start) => {
+            p[0] = current.x;
+            p[1] = current.y;
+            node.setAttribute("cx", current.x);
+            node.setAttribute("cy", current.y);
+            path.setAttribute("d", renderPathData(toPath(segmentsC)));
+            mkSVG({
+              type: "g",
+              id: "superpath",
+              fill: "none",
+              children: pathToCurves(splitPathAtInflections(toPath(segmentsC))).map(c => mkPath(curvesToPath([c]))),
+            });
+          }, update)
+        ),
+      },
+      gui = mkSVG({
+        type: "g",
+        style: {
+          "fill": "none",
+          "stroke": "#76cbe79e",
+          "stroke-width": 0.05,
+          "stroke-dasharray": 20/21*1/5,
+          "stroke-linecap": "butt",
+          "pointer-events": "none",
+          "transform": `rotate(${angle}rad)`,
+        },
+        children: [
+          {
+            type: "line",
+            x1: -0, x2: 0, y1: -10, y2: 10,
+          },
+          {
+            type: "line",
+            x1: -10, x2: 10, y1: -0, y2: 0,
+          },
+          ...arcs.map(mkPath),
+        ]
+      }),
+    ],
+  });
+}
+
+// easySVG
+// - drag n drop
+// - underlying re-coordinator
+//   and listeners for … stuff
+// - prioritizer
+
+function visualize(p1, p2, prec) {
+  var YEAH = doTheThing(p1, p2);
+  return mkSVG({
+    type: "svg",
+    id: "PREVIEW",
     "viewBox": [30, 85, 50, 50],
     "fill": "#000",
     "stroke": "#000",
     "stroke-width": 0.8,
     "style": {
-      "max-width": "calc(100vw - 5px)",
+      "max-width": "calc(50vw - 5px)",
       "max-height": "calc(100vh - 5px)",
       "stroke-linecap": "round",
       "stroke-linejoin": "round",
     },
+    "ondblclick": () => {
+      if (!prec || prec < 500) {
+        visualize(p1, p2, (prec || 00) + 100);
+      }
+    },
     children: [
-      /*
       {
         type: "g",
-        "fill": "#faa6",
-        "stroke": "#faa",
-        children: places.map(i => mkPath(startingAt(calcP(p1, i), p2).toString())),
+        "fill": "red",
+        "stroke": "red",
+        children: placesI(prec || 00).map(i => mkPath(startingAt(calcP(p1, i), p2, true).toString())),
       },
-      */
-      /*
       {
         type: "g",
-        "fill": "#fa2",
-        "stroke": "none",
-        children: placesI(20).map(COMP(P,Q)).map(([cx,cy]) => ({
-          type: "circle",
-          cx, cy, r: 0.1,
+        children: YEAH.map(mkPath),
+      },
+      {
+        type: "g",
+        "class": "annot",
+        "fill": "none",
+        "stroke": "#0804",
+        "stroke-width": 0.1,
+        children: YEAH.map(d => ({
+          type: "path",
+          "d": d,
+          "onclick": e => {
+            let [P,Q] = lookup(e.target);
+            let cs = pathToCurves(getPathData(e.target));
+            console.log(P, Q);
+            try {
+              console.log(calligraphy.composite(P, Q));
+            } catch(e) {
+              console.error(e);
+            }
+          },
+          "ondblclick": e => {e.target.remove();e.stopPropagation()},
         })),
-      },
-      */
-      /*
-      {
-        type: "g",
-        children: fullFillProduct(p1, p2).map(mkPath),
-      },
-      */
-      /*
-      {
-        type: "g",
-        "fill": "none",
-        "stroke": "blue",
-        children: [mkPath(smashProduct(p1, p2)[0])],
-      },
-      {
-        type: "g",
-        "fill": "none",
-        "stroke": "white",
-        children: smashProduct(sp1, p2)[1].map(mkPath),
-      },
-      {
-        type: "g",
-        "fill": "none",
-        "stroke": "gray",
-        children: smashProduct(p1, p2)[1].map(mkPath),
-      },
-      */
-      {
-        type: "g",
-        "fill": "none",
-        "stroke": "#0f08",
-        children: PsOI,
-      },
-      {
-        type: "g",
-        fill: "blue",
-        stroke: "blue",
-        children: smashProduct(splitPathAtTangentsOf(p1, p2), p2)[1].map(mkPath),
-      },
-      {
-        type: "g",
-        "fill": "slategray",
-        "stroke": "slategray",
-        children: YEAH,
       }
     ],
   });
@@ -790,8 +1101,55 @@ function splitPathAtTangents(path1, tangents) {
   return r;
 }
 
+function splitPathAtExtremities(path1) {
+  path1 = getPathData(path1);
+  var p = [0,0]; var s = null;
+  var r = [];
+  for (let seg of path1) {
+    if (seg.type.toLowerCase() === "c") {
+      var segs = splitSegAtTangents(seg, p, [tangent(p, seg.values.slice(-2))]);
+      r.push(...segs);
+    } else {
+      r.push(seg);
+    }
+    [p, s] = getNextStart(seg, p, s);
+  }
+  return r;
+}
+
 function splitPathAtTangentsOf(path1, path2) {
   return splitPathAtTangents(path1, getTangents(path2));
+}
+
+function findBezierInflections(c) {
+  return calligraphy.INFLXNS(c).filter(t => 0 <= t && t <= 1);
+}
+
+function splitBezierAtInflections(c) {
+  return bsplitMany(c, findBezierInflections(c));
+}
+
+function splitSegAtInflections(seg, p) {
+  if (seg.type.toLowerCase() !== "c") throw new Error("Cannot split segment: ", seg);
+  var c = [p, ...group(absolutize(seg, p).values, 2)];
+  var cs = splitBezierAtInflections(c);
+  return cs.map(ci => ({ type: "C", values: [].concat(...ci.slice(1)) }));
+}
+
+function splitPathAtInflections(path1) {
+  path1 = getPathData(path1);
+  var p = [0,0]; var s = null;
+  var r = [];
+  for (let seg of path1) {
+    if (seg.type.toLowerCase() === "c") {
+      var segs = splitSegAtInflections(seg, p);
+      r.push(...segs);
+    } else {
+      r.push(seg);
+    }
+    [p, s] = getNextStart(seg, p, s);
+  }
+  return r;
 }
 
 function getTangents(path) {
@@ -817,10 +1175,10 @@ function getTangents(path) {
   return r;
 }
 
-function startingAt([x,y], path) {
+function startingAt([x,y], path, relative=false) {
   path = getPathData(path, true);
   var origin = getOrigin(path);
-  var diff = [x - origin[0], y - origin[1]];
+  var diff = [x - +!relative*origin[0], y - +!relative*origin[1]];
   for (let seg of path) {
     if (seg.type !== seg.type.toLowerCase()) {
       if (seg.type === "H") {
@@ -896,30 +1254,6 @@ function fullFillProduct(p1, p2) {
   p2 = getPathData(p2);
   p1 = splitPathAtTangentsOf(p1, p2);
   return [...fillProduct(p1, p2), ...smashProduct(p1, p2)[1]];
-}
-
-function fixup(path1, path2) {
-  path1 = getPathData(path1);
-  path2 = getPathData(path2);
-  var tangents = getTangents(path2);
-  var p = [0,0]; var s = null;
-  var r = [];
-  for (let seg of path1) {
-    if (seg.type.toLowerCase() === "c") {
-      var segs = fixupSeg(seg, p, path2, tangents);
-      if (segs.length)
-        r.push([{type:"M", values: p}, ...segs]);
-    }
-    [p, s] = getNextStart(seg, p, s);
-  }
-  return r;
-}
-
-function fixupSeg(seg, p, path2, tangents) {
-  var c = [p, ...group(absolutize(seg, p).values, 2)];
-  let points = findBezierTangents(c, tangents);
-  console.log(points);
-  return [];
 }
 
 </script>
@@ -1099,10 +1433,8 @@ function fixupSeg(seg, p, path2, tangents) {
   const cross2 = (v1,v2) => v1[0]*v2[1] - v1[1]*v2[0];
   const solve_quartic = cs => {
     let rs = quartic(cs.slice().reverse());
-    //console.log({cs,rs});
-    //console.log(cs);
-    let rs2 = rs.filter(r => r.im === 0).map(r => r.re);
-    //console.log(rs2.map(r => ([r, value(cs)(r)])));
+    var ep = 1e-9;
+    let rs2 = rs.filter(r => Math.abs(r.im) < ep).map(r => r.re);
     return rs2;
   };
   const fit_checks = (f0,f1,d0,d1,k0,k1) => {
@@ -1110,10 +1442,12 @@ function fixupSeg(seg, p, path2, tangents) {
     let matches = (ki,ko) =>
       (Math.sign(ki) === Math.sign(ko)) || (Math.abs(ki) < ep && Math.abs(ko) < ep);
     let rs = fit(f0,f1,d0,d1,k0,k1);
-    return rs.filter(r => matches(Bcurvature0(r), k0) && matches(Bcurvature1(r), k1));
+    let rrs = rs.filter(r => matches(Bcurvature0(r), k0) && matches(Bcurvature1(r), k1));
+    return rrs.length ? rrs : rs;
   };
   const fit_check = (f0,f1,d0,d1,k0,k1) => {
     let rs = fit_checks(f0,f1,d0,d1,k0,k1);
+    if (rs.length <= 1) return rs[0];
     let score = ([b0,b1,b2,b3]) => {
       let d0 = sub(b1, b0);
       let d1 = sub(b3, b2);
@@ -1127,11 +1461,14 @@ function fixupSeg(seg, p, path2, tangents) {
     let a = sub(f1, f0);
     let d0xa = cross2(d0, a);
     let axd1 = cross2(a, d1);
-    //console.log({a: normalize(a), d0xd1, d0xa, axd1});
     let δs;
     if (d0xd1 === 0) {
       δs = [Math.sqrt((2/3)*(d0xa)/k0), Math.sqrt((2/3)*(axd1)/k1)];
     } else {
+      let ep = 1e-9;
+      if (Math.abs(axd1) < ep || Math.abs(d0xa) < ep) {
+        throw new Error("parallel " + [a, axd1, d0xa]);
+      }
       // https://herbie.uwplse.org/
       /**/
       let ρs;
@@ -1139,7 +1476,9 @@ function fixupSeg(seg, p, path2, tangents) {
       let R0 = 1.5 * (((axd1 / d0xa) / (d0xd1 / k0)) / (d0xd1 / axd1));
       //let R1 = (3/2)*(k1*d0xa*d0xa)/(axd1*d0xd1*d0xd1);
       let R1 = 1.5 * (((d0xa / axd1) / (d0xd1 / k1)) / (d0xd1 / d0xa));
-      //console.log({ R0, R1 });
+      if (!Number.isFinite(R0) || !Number.isFinite(R1)) {
+        throw new Error("NaNaNaNaNa " + [R0,R1,k0,k1] + "; " + [a, axd1, d0xa]);
+      }
       let c0 = [1-R1, -1, 2*R1*R0, 0, -R1*R0*R0];
       let c1 = [1-R0, -1, 2*R0*R1, 0, -R0*R1*R1];
       let ρ0s = solve_quartic(c0);
@@ -1147,28 +1486,18 @@ function fixupSeg(seg, p, path2, tangents) {
       ρs = [
         ρ0s.map(ρ0 => [ρ0, 1 - R0*ρ0*ρ0]),
         ρ1s.map(ρ1 => [1 - R1*ρ1*ρ1, ρ1]),
-        ρ0s.flatMap(ρ0 => ρ1s.map(ρ1 => {
-          //console.log(ρ0 - (1 - R1*ρ1*ρ1), ρ1 - (1 - R0*ρ0*ρ0));
-          return [ρ0, ρ1];
-        })),
-      ][0];
-      //console.log(ρs);
+        ρ0s.flatMap(ρ0 => ρ1s.map(ρ1 => [ρ0, ρ1])),
+      ][1].filter(p => p.every(Number.isFinite));
+      if (!ρs.length) {
+        throw new Error("no quartic solutions " + [c0, ρ0s, c1, ρ1s].join("; "));
+      }
       δs = ρs.map(([ρ0,ρ1]) => [ρ0 * axd1 / d0xd1, ρ1 * d0xa / d0xd1]);
-      /*/
-      let c0 = [axd1*d0xd1*d0xd1 - (3/2)*k1*d0xa*d0xa, -d0xd1*d0xd1*d0xd1, (9/2)*k1*k0*d0xa, 0, -(27/8)*k1*k0*k0];
-      let c1 = [d0xa*d0xd1*d0xd1 - (3/2)*k0*axd1*axd1, -d0xd1*d0xd1*d0xd1, (9/2)*k1*k0*axd1, 0, -(27/8)*k1*k0*k0];
-      let δ0s = solve_quartic(c0);
-      let δ1s = solve_quartic(c1);
-      δs = [
-        δ0s.map(δ0 => [δ0, (d0xa - (3/2)*k0*δ0*δ0)/d0xd1]),
-        δ1s.map(δ1 => [(axd1 - (3/2)*k1*δ1*δ1)/d0xd1, δ1]),
-        δ0s.flatMap(δ0 => δ1s.map(δ1 => {
-          console.log(δ0 - (axd1 - (3/2)*k1*δ1*δ1)/d0xd1, δ1 - (d0xa - (3/2)*k0*δ0*δ0)/d0xd1);
-          return [δ0, δ1];
-        })),
-      ][2];
-      /**/
+      let δδs = δs;
       δs = δs.filter(([δ0,δ1]) => δ0 >= 0 && δ1 >= 0);
+      if (!δs.length && δδs.length) {
+        throw new Error("filtered out " + δδs.join("; "));
+        //δs = δδs;
+      }
     }
     return δs.map(([δ0,δ1]) => [f0,add(f0, mul(δ0, d0)),sub(f1, mul(δ1, d1)),f1]);
   };
@@ -1201,8 +1530,10 @@ function fixupSeg(seg, p, path2, tangents) {
       return [-eq[0]/eq[1]];
     } else if (d === 2) {
       var disc = eq[1]*eq[1] - 4*eq[2]*eq[0];
+      var ep = 1e-10;
+      if (Math.abs(disc) < ep) disc = 0;
       if (disc < 0) return [];
-      if (disc === 0) return -eq[1]/eq[2]/2;
+      if (disc === 0) return [-eq[1]/eq[2]/2];
       var r = Math.sqrt(disc);
       return [+r,-r].map(sr => (-eq[1] + sr)/eq[2]/2);
     }
@@ -1215,7 +1546,7 @@ function fixupSeg(seg, p, path2, tangents) {
       var disc = eq[1]*eq[1] - 4*eq[2]*eq[0];
       throw new Error("No solutions to " + eq + " with disc = " + disc);
     }
-    var ep = 1e-6;
+    var ep = 1e-5;
     var norm_sols = sols.filter(t => 0-ep <= t && t <= 1+ep).map(t => Math.max(0, Math.min(1, t)));
     if (norm_sols.length === 1) {
       return [norm_sols[0], [+1, -1][sols.findIndex(t => t == norm_sols[0])]];
@@ -1224,16 +1555,18 @@ function fixupSeg(seg, p, path2, tangents) {
   };
   const solve_deriv = (eq, dq) => {
     if (degree(eq) > 2) throw Error(eq);
-    let [q, sgn] = solve_norm_sgn(eq);
+    let q = solve_norm(eq);
+    if ((2*eq[2]*q + eq[1]) === 0) {
+      console.error("DISASTER", {eq,dq,q});
+      let rs = solve_deriv_(eq, dq);
+      console.error("DISASTER", {eq,dq,q,rs});
+      return rs[4];
+    }
     return -(dq[2]*q*q + dq[1]*q + dq[0])/(2*eq[2]*q + eq[1]);
-    let disc = sgn*Math.sqrt(eq[1]*eq[1] - 4*eq[2]*eq[0]);
-    let n = eq[1]*dq[1] - 2*dq[2]*eq[0] - 2*eq[2]*dq[0];
-    console.log([-dq[1]/eq[0]/2, n/disc/eq[0], -dq[2]*q/eq[0]]);
-    return -dq[1]/eq[0]/2 + n/disc/eq[0] - dq[2]*q/eq[0];
   };
   const solve_deriv2 = (eq, dq, cq) => {
     if (degree(eq) > 2) throw Error(eq);
-    let [q, sgn] = solve_norm_sgn(eq);
+    let q = solve_norm(eq);
     let qq = solve_deriv(eq, dq);
     return (-2*eq[2]*qq*qq + cq[2]*q*q + cq[1]*q + cq[0])/(2*eq[2]*q + eq[1]);
   };
@@ -1258,7 +1591,7 @@ function fixupSeg(seg, p, path2, tangents) {
     return sub(dmul(QQ[1], PP[0]), dmul(QQ[0], PP[1]));
   };
   const T_SOL = (P,Q) => p => solve_norm(values(T_IMPLICIT(P,Q))(p));
-  const COMP = (P,Q) => p => add(EVAL(B(P))(p), sub(EVAL(B(Q))(T_SOL(P,Q)(p)), EVAL(B(Q))(T_SOL(P,Q)(0))));
+  const COMP = (P,Q) => p => add(EVAL(B(P))(p), EVAL(B(Q))(T_SOL(P,Q)(p)));
   const T_DERIV = (P,Q) => p => {
     // multivariate polynomial in q,p
     let EQ = T_IMPLICIT(P,Q);
@@ -1275,25 +1608,36 @@ function fixupSeg(seg, p, path2, tangents) {
       return (T_SOL(P,Q)(dp+p) - q)/dp;
     });
   };
-  const PQ_CURVATURE = (P,Q) => p => {
-    let q = T_SOL(P,Q)(p);
+  const PQ_CURVATURE = (P,Q) => {
     let PP = DERIV(B(P));
+    let PPE = EVAL(PP);
     let QQ = DERIV(B(Q));
-    let PPp = EVAL(PP)(p);
-    let QQq = EVAL(QQ)(q);
-    let PPPp = EVAL(DERIV(PP))(p);
-    let QQQq = EVAL(DERIV(QQ))(q);
-    let R = T_DERIV(P,Q)(p);//
-    let XX = PPp[0] + QQq[0]*R;
-    let YY = PPp[1] + QQq[1]*R;
-    let XXXYY = PPPp[0]*PPp[1] + PPPp[0]*QQq[1]*R + QQQq[0]*R*R*PPp[1] + QQQq[0]*QQq[1]*R*R*R;
-    let YYYXX = PPPp[1]*PPp[0] + PPPp[1]*QQq[0]*R + QQQq[1]*R*R*PPp[0] + QQQq[1]*QQq[0]*R*R*R;
-    let speed = Math.pow(XX*XX + YY*YY, 3/2);
-    //console.log({P,Q,p,q,PP,QQ,PPp,QQq,PPPp,QQQq,R,XX,YY,XXXYY,YYYXX,speed});
-    return (XXXYY - YYYXX)/speed;
-    /*
-    (x''y' - y''x')/((x'2 + y'2)^3/2)
-    */
+    let QQE = EVAL(QQ);
+    let PPPE = EVAL(DERIV(PP));
+    let QQQE = EVAL(DERIV(QQ));
+    let TT = T_DERIV(P,Q);
+    return (p,q=undefined) => {
+      if (q === undefined) q = T_SOL(P,Q)(p);
+      let PPp = PPE(p);
+      let QQq = QQE(q);
+      let PPPp = PPPE(p);
+      let QQQq = QQQE(q);
+      let R = TT(p);
+      let XX = PPp[0] + QQq[0]*R;
+      let YY = PPp[1] + QQq[1]*R;
+      let XXXYY = PPPp[0]*PPp[1] + PPPp[0]*QQq[1]*R + QQQq[0]*R*R*PPp[1] + QQQq[0]*QQq[1]*R*R*R;
+      let YYYXX = PPPp[1]*PPp[0] + PPPp[1]*QQq[0]*R + QQQq[1]*R*R*PPp[0] + QQQq[1]*QQq[0]*R*R*R;
+      let speed = Math.pow(XX*XX + YY*YY, 3/2);
+      let k = (XXXYY - YYYXX)/speed;
+      if (!Number.isFinite(k)) {
+        console.error("NaN", {k,R,speed,p,q,P,Q});
+        throw new Error("NaN");
+      }
+      return k;
+      /*
+      (x''y' - y''x')/((x'2 + y'2)^3/2)
+      */
+    };
   };
   const T_VERIFY = (P,Q) => (p, q) => value(values(T_IMPLICIT(P,Q))(p))(q === undefined ? T_SOL(P,Q)(p) : q);
   const T_VERIFY2 = (P,Q) => (p, q) => value(values(T_IMPLICIT(Q,P))(q === undefined ? T_SOL(P,Q)(p) : q))(p);
@@ -1311,18 +1655,34 @@ function fixupSeg(seg, p, path2, tangents) {
   };
 
   function composite(P,Q) {
+    return compositeI(P,Q)[1];
+  }
+
+  function compositeI(P,Q) {
     let P0 = P[0];
     let P1 = P[3];
-    let Q0 = EVAL(B(Q))(T_SOL(P,Q)(0));
-    let Q1 = EVAL(B(Q))(T_SOL(P,Q)(1));
+    let Qt = EVAL(B(Q));
+    let q = T_SOL(P,Q);
+    let q0 = q(0);
+    let Q0 = Qt(q0);
+    let q1 = q(1);
+    let Q1 = Qt(q1);
     const f0 = add(P0, Q0);
     const f1 = add(P1, Q1);
     const d0 = sub(P[1], P[0]);
     const d1 = sub(P[3], P[2]);
-    const k0 = PQ_CURVATURE(P,Q)(0);
-    const k1 = PQ_CURVATURE(P,Q)(1);
-    //console.log({f0,f1,d0,d1,k0,k1});
-    return fit_check(f0,f1,d0,d1,-k0,-k1);
+    const k = PQ_CURVATURE(P,Q);
+    const k0 = k(0,q0);
+    const k1 = k(1,q1);
+    return [q0, fit_check(f0,f1,d0,d1,-k0,-k1), q1];
+  }
+
+  function INFLXNS(P) {
+    let PP = transpose(DERIV(B(P)));
+    let PPP = transpose(DERIV(DERIV(B(P))));
+    let EQ = sub(pmul(PPP[0], PP[1]), pmul(PPP[1], PP[0]));
+    let rs = solve(EQ);
+    return rs;
   }
 
   //const T_DERIV = ;
@@ -1334,9 +1694,9 @@ function fixupSeg(seg, p, path2, tangents) {
     transposing, transposed,
     solve_norm, solve, solve_deriv, solve_deriv_,
     T_IMPLICIT, T_SOL, T_VERIFY, T_VERIFY2, T_VERIFYT, T_VERIFY3,
-    T_DERIV, T_DERIVS, COMP,
+    T_DERIV, T_DERIVS, COMP, INFLXNS,
     curvature, Bcurvature, Bcurvature_polys, Bcurvature0, Bcurvature1,
-    composite,
+    composite, compositeI,
     fit, fit_check, fit_existing, fit_existing_score,
     raise, pmul, norm, normalize,
     ex: (function() {
